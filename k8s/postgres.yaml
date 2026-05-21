@@ -4,10 +4,10 @@ metadata:
   name: postgres-pvc
   namespace: sistema
 spec:
-  acessModes: [ "ReadWriteOnce" ]
+  accessModes: [ "ReadWriteOnce" ]
   resources:
     requests:
-      storage: 
+      storage: 1Gi
 
 ---
 apiVersion: apps/v1
@@ -62,6 +62,6 @@ metadata:
 spec:
   ports:
     - port: 5432
-      targetport: 5432
+      targetPort: 5432
   selector:
     app: postgres
