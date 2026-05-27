@@ -1,6 +1,7 @@
-
 import React, { useState } from 'react';
 import './Login.css';
+
+import { validarSenha } from './utils/validacoes';
 
 function Login() {
   const [email, setEmail] = useState('');
@@ -8,8 +9,14 @@ function Login() {
 
   const handleLogin = (e) => {
     e.preventDefault();
+
     
-    // conectar com o seu BACKEND
+    if (!validarSenha(senha)) {
+      alert('A senha deve conter exatamente 8 caracteres.');
+      return; 
+    }
+
+    
     console.log('Tentando logar com:', { email, senha });
     alert(`Login enviado!\nE-mail: ${email}`);
   };
