@@ -1,6 +1,9 @@
-import pg from 'pg'
+import dotenv from 'dotenv';
+dotenv.config({ path: '../.env' }); 
+
+import pg from 'pg';
 console.log("Minha senha carregada é:", process.env.DB_PASSWORD);
-const {Client} = pg;
+
 
 const client = new pg.Client({
   user: process.env.DB_USER,
