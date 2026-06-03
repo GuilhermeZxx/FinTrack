@@ -46,7 +46,7 @@ services:
 
 
     environment:
-      VITE_API_URL: http://backend:3000
+      VITE_API_URL: http://localhost:${BACKEND_PORT}/api
 
     depends_on:
       - backend
@@ -82,4 +82,3 @@ services:
 networks:
   fintrack_network:
     driver: bridge
-
