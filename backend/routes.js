@@ -1,77 +1,166 @@
 import { Router } from 'express';
-import bcrypt from 'bcrypt';
-import client from './db.js'; // Importa a conexão com o banco
+import { hashPassword, signJwt, verifyJwt, verifyPassword } from './auth.js';
+import { postgresStore } from './store.js';
+import { validateLogin, validateRegistration, validateTransaction } from './validators.js';
 
-const router = Router();
+function publicUser(user) {
+  const { passwordHash, ...safeUser } = user;
+  return safeUser;
+}
 
-
-router.post('/cadastro', async (req, res) => {
-    const { nome, email, senha } = req.body;
-
+function authMiddleware(store) {
+  return async (req, res, next) => {
     try {
-        if (!nome || !email || !senha) {
-            return res.status(400).json({ error: "Todos os campos são obrigatórios" });
-        }
+      const authorization = req.headers.authorization || '';
+      const [, token] = authorization.split(' ');
 
-      
-        const senhaCriptografada = await bcrypt.hash(senha, 10);
+      if (!token) {
+        return res.status(401).json({ error: 'Token de autenticação ausente.' });
+      }
 
-        const result = await client.query(
-            `INSERT INTO usuarios (nome, email, senha) VALUES ($1, $2, $3) RETURNING *`,
-            [nome, email, senhaCriptografada]
-        );
+      const payload = verifyJwt(token);
+      const user = await store.findUserById(payload.sub);
 
-        const novoUsuario = result.rows[0];
-        delete novoUsuario.senha; 
+      if (!user) {
+        return res.status(401).json({ error: 'Usuário não encontrado.' });
+      }
 
-        res.status(201).json(novoUsuario);
-    } catch (error) {
-        console.error(error);
-        if (error.code === '23505') {
-            return res.status(400).json({ error: "Este e-mail já está cadastrado." });
-        }
-        res.status(500).json({ error: "Erro interno no servidor." });
+      req.user = user;
+      return next();
+    } catch {
+      return res.status(401).json({ error: 'Token inválido ou expirado.' });
     }
-});
+  };
+}
 
+export function createRoutes({ store = postgresStore } = {}) {
+  const router = Router();
+  const requireAuth = authMiddleware(store);
 
-router.post('/login', async (req, res) => {
-    const { email, senha } = req.body;
+  router.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'fintrack-api' });
+  });
 
+  router.post('/auth/register', async (req, res, next) => {
     try {
-        if (!email || !senha) {
-            return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
-        }
+      const validation = validateRegistration(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Dados inválidos.', details: validation.errors });
+      }
 
-        
-        const result = await client.query(
-            `SELECT * FROM usuarios WHERE email = $1`,
-            [email]
-        );
+      const passwordHash = hashPassword(validation.data.password);
+      const user = await store.createUser({ ...validation.data, passwordHash });
+      const token = signJwt({ sub: user.id, email: user.email });
 
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: "E-mail ou senha incorretos" });
-        }
-
-        const usuario = result.rows[0];
-
-        
-        const senhaCorreta = await bcrypt.compare(senha, usuario.senha);
-
-        if (!senhaCorreta) {
-            return res.status(401).json({ error: "E-mail ou senha incorretos" });
-        }
-
-        delete usuario.senha;
-
-        res.json({
-            message: "Login realizado com sucesso!",
-            usuario: usuario
-        });
+      return res.status(201).json({ user: publicUser(user), token });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Erro interno no servidor." });
+      if (error.code === '23505' || /e-mail/i.test(error.message)) {
+        return res.status(409).json({ error: 'Este e-mail já está cadastrado.' });
+      }
+      return next(error);
     }
-});
+  });
 
-export default router;
+  router.post('/auth/login', async (req, res, next) => {
+    try {
+      const validation = validateLogin(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Dados inválidos.', details: validation.errors });
+      }
+
+      const user = await store.findUserByEmail(validation.data.email);
+      const passwordMatches = user && verifyPassword(validation.data.password, user.passwordHash);
+
+      if (!passwordMatches) {
+        return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
+      }
+
+      const token = signJwt({ sub: user.id, email: user.email });
+      return res.json({ user: publicUser(user), token });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.get('/auth/me', requireAuth, (req, res) => {
+    res.json({ user: publicUser(req.user) });
+  });
+
+  router.get('/transactions', requireAuth, async (req, res, next) => {
+    try {
+      const transactions = await store.listTransactions(req.user.id, {
+        type: req.query.type,
+        category: req.query.category,
+        month: req.query.month,
+        search: req.query.search,
+      });
+
+      return res.json({ transactions });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/transactions', requireAuth, async (req, res, next) => {
+    try {
+      const validation = validateTransaction(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Dados inválidos.', details: validation.errors });
+      }
+
+      const transaction = await store.createTransaction(req.user.id, validation.data);
+      return res.status(201).json({ transaction });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.put('/transactions/:id', requireAuth, async (req, res, next) => {
+    try {
+      const validation = validateTransaction(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Dados inválidos.', details: validation.errors });
+      }
+
+      const transaction = await store.updateTransaction(
+        req.user.id,
+        Number(req.params.id),
+        validation.data,
+      );
+
+      if (!transaction) {
+        return res.status(404).json({ error: 'Transação não encontrada.' });
+      }
+
+      return res.json({ transaction });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.delete('/transactions/:id', requireAuth, async (req, res, next) => {
+    try {
+      const deleted = await store.deleteTransaction(req.user.id, Number(req.params.id));
+      if (!deleted) {
+        return res.status(404).json({ error: 'Transação não encontrada.' });
+      }
+
+      return res.status(204).send();
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.get('/reports/summary', requireAuth, async (req, res, next) => {
+    try {
+      const summary = await store.getSummary(req.user.id);
+      return res.json({ summary });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  return router;
+}
+
+export default createRoutes;
